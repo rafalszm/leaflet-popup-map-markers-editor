@@ -1,0 +1,320 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+  <meta charset="UTF-8">
+  <title>Popup z mapą Leaflet</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <link rel="stylesheet" href="https://unpkg.com/leaflet-control-geocoder/dist/Control.Geocoder.css" />
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css" />
+  <style>
+    body { font-family: sans-serif; margin: 0; }
+    #mapModal {
+      position: fixed;
+      top: 0; left: 0; right: 0; bottom: 0;
+      background: rgba(0,0,0,0.7);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 1000;
+    }
+    .map-container {
+      width: 90vw;
+      height: 80vh;
+      background: white;
+      position: relative;
+      border-radius: 10px;
+      overflow: hidden;
+    }
+    #map {
+      width: 100%;
+      height: 100%;
+    }
+    .popup-edit {
+      display: flex;
+      flex-direction: column;
+      gap: 5px;
+    }
+    .popup-edit input, .popup-edit select, .popup-edit button {
+      font-size: 14px;
+      padding: 4px;
+    }
+    .popup-edit button {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+    }
+    .leaflet-bar button {
+      background: white;
+      border: none;
+      cursor: pointer;
+      padding: 6px;
+    }
+    .leaflet-bar button.active {
+      background: #4CAF50;
+      color: white;
+    }
+  </style>
+</head>
+<body>
+
+<button onclick="openMapModal()">Otwórz mapę</button>
+
+<div id="mapModal" style="display:none;">
+  <div class="map-container">
+    <div id="map"></div>
+    <button onclick="closeMapModal()" style="position:absolute; top:10px; right:10px; z-index:1001;">Zamknij</button>
+  </div>
+</div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://unpkg.com/leaflet-control-geocoder/dist/Control.Geocoder.js"></script>
+<script>
+  let map;
+  let markerGroups = {
+    'wejście': [],
+    'niebezpieczeństwo': [],
+    'obiekt': []
+  };
+  let allMarkers = [];
+  let currentAddType = null;
+  let gpsMarker = null;
+
+  const baseLayers = {
+    "Mapa": L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      maxZoom: 19,
+      attribution: '&copy; OpenStreetMap'
+    }),
+    "Satelita": L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
+      maxZoom: 19,
+      attribution: '&copy; Esri'
+    }),
+    "Dark": L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      maxZoom: 19,
+      attribution: '&copy; OpenStreetMap',
+      className: 'dark-map'
+    })
+  };
+
+  const lidarLayer = L.tileLayer.wms('https://mapy.geoportal.gov.pl/wss/service/PZGIK/NMT/GRID1/WMS/ShadedRelief', {
+    layers: 'Raster',
+    format: 'image/jpeg',
+    transparent: false,
+    version: '1.1.1',
+    maxZoom: 19,
+    opacity: 0.6,
+    attribution: '&copy; Geoportal.gov.pl'
+  });
+
+  function openMapModal() {
+    document.getElementById('mapModal').style.display = 'flex';
+    setTimeout(() => {
+      if (!map) initMap();
+      map.invalidateSize();
+    }, 100);
+  }
+
+  function initMap() {
+    map = L.map('map', {
+      zoomControl: false,
+      layers: [baseLayers["Mapa"]]
+    }).setView([52.2297, 21.0122], 13);
+
+    L.control.layers(baseLayers, { "LIDAR": lidarLayer }, { position: 'topright' }).addTo(map);
+    L.Control.geocoder({ position: 'topright' }).addTo(map);
+    L.control.zoom({ position: 'bottomleft' }).addTo(map);
+
+    const MarkerControl = L.Control.extend({
+      options: { position: 'topleft' },
+      onAdd: function () {
+        const container = L.DomUtil.create('div', 'leaflet-bar leaflet-control');
+
+        const types = [
+          { type: 'wejście', icon: 'fa-door-open' },
+          { type: 'niebezpieczeństwo', icon: 'fa-triangle-exclamation' },
+          { type: 'obiekt', icon: 'fa-map-marker-alt' }
+        ];
+
+        types.forEach(item => {
+          const btn = L.DomUtil.create('button', '', container);
+          btn.innerHTML = `<i class="fas ${item.icon}"></i>`;
+          btn.title = `Dodaj ${item.type}`;
+          btn.onclick = (e) => {
+            L.DomEvent.stopPropagation(e);
+            L.DomEvent.preventDefault(e);
+            currentAddType = currentAddType === item.type ? null : item.type;
+            Array.from(container.children).forEach(b => b.classList.remove('active'));
+            if (currentAddType) btn.classList.add('active');
+          };
+        });
+
+        return container;
+      }
+    });
+
+    map.addControl(new MarkerControl());
+
+    const GpsControl = L.Control.extend({
+      options: { position: 'bottomright' },
+      onAdd: function () {
+        const container = L.DomUtil.create('div', 'leaflet-bar leaflet-control');
+        const btn = L.DomUtil.create('button', '', container);
+        btn.innerHTML = '<i class="fas fa-location-crosshairs"></i>';
+        btn.title = 'Pokaż moją lokalizację';
+        btn.onclick = () => {
+          map.locate({ setView: true, maxZoom: 16 });
+        };
+        return container;
+      }
+    });
+
+    map.addControl(new GpsControl());
+
+    map.on('locationfound', function (e) {
+      if (gpsMarker) map.removeLayer(gpsMarker);
+      gpsMarker = L.circleMarker(e.latlng, {
+        radius: 8,
+        fillColor: '#3388ff',
+        color: '#fff',
+        weight: 2,
+        opacity: 1,
+        fillOpacity: 0.9
+      }).addTo(map);
+    });
+
+    map.on('click', function(e) {
+      if (!currentAddType) return;
+
+      const type = currentAddType;
+      if (markerGroups[type].length >= 3) {
+        alert(`Możesz dodać maksymalnie 3 markery typu "${type}"`);
+        return;
+      }
+
+      const marker = L.marker(e.latlng, {
+        icon: getCustomIcon(type),
+        draggable: true
+      }).addTo(map);
+
+      marker._data = { lat: e.latlng.lat, lng: e.latlng.lng, type: type, note: '' };
+      markerGroups[type].push(marker);
+      allMarkers.push(marker);
+
+      updatePopup(marker);
+
+      marker.on('dragend', function() {
+        updateMarkerData(marker);
+      });
+
+      currentAddType = null;
+      document.querySelectorAll('.leaflet-bar button').forEach(b => b.classList.remove('active'));
+    });
+  }
+
+  function getCustomIcon(type) {
+    const colors = {
+      'wejście': 'green',
+      'niebezpieczeństwo': 'red',
+      'obiekt': 'blue'
+    };
+    return L.icon({
+      iconUrl: `https://maps.google.com/mapfiles/ms/icons/${colors[type]}-dot.png`,
+      iconSize: [32, 32],
+      iconAnchor: [16, 32]
+    });
+  }
+
+  function updatePopup(marker) {
+    const popupContent = document.createElement('div');
+    popupContent.className = 'popup-edit';
+
+    const noteInput = document.createElement('input');
+    noteInput.type = 'text';
+    noteInput.value = marker._data.note;
+    noteInput.placeholder = 'Opis';
+
+    const typeSelect = document.createElement('select');
+    ['wejście', 'niebezpieczeństwo', 'obiekt'].forEach(option => {
+      const opt = document.createElement('option');
+      opt.value = option;
+      opt.textContent = option;
+      if (option === marker._data.type) opt.selected = true;
+      typeSelect.appendChild(opt);
+    });
+
+    const saveBtn = document.createElement('button');
+    saveBtn.innerHTML = '<i class="fas fa-save"></i> Zapisz';
+    saveBtn.onclick = () => {
+      const newType = typeSelect.value;
+      const newNote = noteInput.value;
+
+      if (newType !== marker._data.type) {
+        markerGroups[marker._data.type] = markerGroups[marker._data.type].filter(m => m !== marker);
+        if (markerGroups[newType].length >= 3) {
+          alert(`Nie można zmienić typu – osiągnięto limit dla "${newType}"`);
+          return;
+        }
+        marker._data.type = newType;
+        marker.setIcon(getCustomIcon(newType));
+        markerGroups[newType].push(marker);
+      }
+      marker._data.note = newNote;
+      marker.setPopupContent(popupContent);
+      marker.closePopup();
+    };
+
+    const deleteBtn = document.createElement('button');
+    deleteBtn.innerHTML = '<i class="fas fa-trash"></i> Usuń';
+    deleteBtn.onclick = () => {
+      map.removeLayer(marker);
+      removeMarkerData(marker);
+    };
+
+    popupContent.appendChild(noteInput);
+    popupContent.appendChild(typeSelect);
+    popupContent.appendChild(saveBtn);
+    popupContent.appendChild(deleteBtn);
+
+    marker.bindPopup(popupContent).openPopup();
+  }
+
+  function updateMarkerData(marker) {
+    const data = marker._data;
+    const latlng = marker.getLatLng();
+    data.lat = latlng.lat;
+    data.lng = latlng.lng;
+  }
+
+  function removeMarkerData(marker) {
+    const type = marker._data.type;
+    markerGroups[type] = markerGroups[type].filter(m => m !== marker);
+    allMarkers = allMarkers.filter(m => m !== marker);
+  }
+
+  function closeMapModal() {
+    const center = map.getCenter();
+    const zoom = map.getZoom();
+    let activeBaseLayer = null;
+    map.eachLayer(layer => {
+      if (layer instanceof L.TileLayer && map.hasLayer(layer)) {
+        Object.entries(baseLayers).forEach(([name, l]) => {
+          if (l === layer) activeBaseLayer = name;
+        });
+      }
+    });
+
+    const result = {
+      view: {
+        center: { lat: center.lat, lng: center.lng },
+        zoom: zoom,
+        baseLayer: activeBaseLayer
+      },
+      markers: allMarkers.map(m => m._data)
+    };
+
+    console.log('Zaznaczone dane:', JSON.stringify(result, null, 2));
+
+    document.getElementById('mapModal').style.display = 'none';
+  }
+</script>
+</body>
+</html>
